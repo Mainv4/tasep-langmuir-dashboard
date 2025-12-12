@@ -22,11 +22,24 @@ BASE_DIR = Path(__file__).parent.parent
 
 
 def parse_params_from_filename(filename):
-    """Extract parameters from filename pattern."""
-    pattern = r'alpha_in_(\d+\.\d+)_alpha_out_(\d+\.\d+)_Omega_A_(\d+\.\d+)'
-    match = re.search(pattern, str(filename))
+    """Extract parameters from filename pattern.
+
+    Supports two formats:
+    - Langmuir: alpha_in_X_alpha_out_Y_Omega_A_Z_Omega_D_Z_...
+    - TASEP-only: alpha_in_X_alpha_out_Y_kappa_... (no Omega, treated as Omega=0)
+    """
+    # Pattern 1: With Omega (Langmuir)
+    pattern_langmuir = r'alpha_in_(\d+\.\d+)_alpha_out_(\d+\.\d+)_Omega_A_(\d+\.\d+)'
+    match = re.search(pattern_langmuir, str(filename))
     if match:
         return float(match.group(1)), float(match.group(2)), float(match.group(3))
+
+    # Pattern 2: Without Omega (TASEP-only) -> Omega=0
+    pattern_tasep = r'alpha_in_(\d+\.\d+)_alpha_out_(\d+\.\d+)_kappa'
+    match = re.search(pattern_tasep, str(filename))
+    if match:
+        return float(match.group(1)), float(match.group(2)), 0.0
+
     return None, None, None
 
 
@@ -315,6 +328,34 @@ def load_activity_fluctuations():
         except Exception as e:
             print(f"Error loading {f}: {e}")
 
+    # Load TASEP-only fluctuations from density_profiles_dict.npy (Omega=0)
+    tasep_file = BASE_DIR.parent / "src" / "test_results" / "chain_100" / "density_profiles_dict.npy"
+    if tasep_file.exists():
+        tasep_data = np.load(tasep_file, allow_pickle=True).item()
+        target_pairs = [(0.1, 0.1), (0.1, 0.2), (0.2, 0.1)]
+
+        for alpha_in, alpha_out in target_pairs:
+            if (alpha_in, alpha_out) in tasep_data:
+                std_100 = tasep_data[(alpha_in, alpha_out)]['std_error']
+                # Interpolate from 100 to 300 points
+                x_100 = np.linspace(0, 1, 100)
+                x_300 = np.linspace(0, 1, 300)
+                std_300 = np.interp(x_300, x_100, std_100)
+
+                # Segment into 30 bins
+                for seg_idx in range(n_segments):
+                    start = seg_idx * segment_size
+                    end = (seg_idx + 1) * segment_size
+                    sigma_seg = np.mean(std_300[start:end])
+
+                    data.append({
+                        'alpha_in': alpha_in,
+                        'alpha_out': alpha_out,
+                        'Omega': 0.0,
+                        'segment': segment_centers[seg_idx],
+                        'sigma_rho_theory': sigma_seg
+                    })
+
     print(f"Loaded theoretical fluctuations for {len(data)} segment-parameter combinations")
     return pd.DataFrame(data)
 
@@ -433,7 +474,8 @@ def main():
 
     # Add derived columns
     df['alpha_ratio'] = df['alpha_in'] / df['alpha_out']
-    df['log_Omega'] = np.log10(df['Omega'])
+    # Handle log10(0) = -inf for TASEP-only simulations
+    df['log_Omega'] = np.where(df['Omega'] > 0, np.log10(df['Omega']), -np.inf)
 
     # Sort and save
     df = df.sort_values(['alpha_in', 'alpha_out', 'Omega', 'segment'])
